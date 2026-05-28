@@ -3,14 +3,18 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QCloseEvent, QIcon
-from PyQt5.QtWidgets import QApplication, QStyle
+from PyQt5.QtWidgets import QApplication, QMainWindow, QStyle, QSystemTrayIcon
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app_controller import AppController
+from app_controller import APP_VERSION, AppController
+
+
+EXPECTED_VERSION = "0.2.0"
 
 
 class AppControllerTest(unittest.TestCase):
@@ -46,7 +50,8 @@ class AppControllerTest(unittest.TestCase):
 
         self.assertTrue(started)
         self.assertTrue(controller.preview_window.isVisible())
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
+        self.assertEqual(APP_VERSION, EXPECTED_VERSION)
+        self.assertEqual(controller.preview_window.windowTitle(), f"久坐提醒 v{EXPECTED_VERSION}")
         self.assertFalse(controller.preview_window.windowIcon().isNull())
 
     def test_preview_window_exposes_timer_control_buttons(self):
@@ -56,14 +61,367 @@ class AppControllerTest(unittest.TestCase):
         self.assertEqual(controller.preview_pause_button.text(), "暂停")
         self.assertEqual(controller.preview_reset_button.text(), "重置")
 
-    def test_preview_window_exposes_settings_and_reminder_actions(self):
+    def test_preview_window_uses_main_window_with_menu_bar(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertIsInstance(controller.preview_window, QMainWindow)
+        self.assertIsNotNone(controller.preview_window.menuBar())
+        self.assertEqual(APP_VERSION, EXPECTED_VERSION)
+        self.assertEqual(controller.preview_window.windowTitle(), f"久坐提醒 v{EXPECTED_VERSION}")
+
+    def test_preview_window_arranges_buttons_without_tabs(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        button_layout = controller.preview_button_layout
+
+        self.assertEqual(button_layout.columnCount(), 2)
+        self.assertEqual(button_layout.itemAtPosition(0, 0).widget(), controller.preview_start_button)
+        self.assertEqual(button_layout.itemAtPosition(0, 1).widget(), controller.preview_pause_button)
+        self.assertEqual(button_layout.itemAtPosition(1, 0).widget(), controller.preview_reset_button)
+        self.assertEqual(button_layout.itemAtPosition(1, 1).widget(), controller.preview_reminder_button)
+        self.assertEqual(button_layout.itemAtPosition(2, 0), None)
+        self.assertEqual(button_layout.itemAtPosition(2, 1), None)
+        self.assertFalse(hasattr(controller, "preview_tabs"))
+        self.assertEqual(controller.preview_start_button.text(), "开始")
+        self.assertEqual(controller.preview_pause_button.text(), "暂停")
+        self.assertEqual(controller.preview_reset_button.text(), "重置")
+        self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
+
+    def test_preview_window_keeps_main_buttons_in_central_widget(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        central_widget = controller.preview_window.centralWidget()
+
+        self.assertEqual(controller.preview_start_button.parent(), central_widget)
+        self.assertEqual(controller.preview_pause_button.parent(), central_widget)
+        self.assertEqual(controller.preview_reset_button.parent(), central_widget)
+        self.assertEqual(controller.preview_reminder_button.parent(), central_widget)
+
+    def test_menu_bar_exposes_settings_and_history_actions(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        menu_actions = controller.preview_window.menuBar().actions()
+        menu_texts = [action.text() for action in menu_actions]
+
+        self.assertIn("打开设置", menu_texts)
+        self.assertIn("历史版本", menu_texts)
+
+    def test_settings_action_is_attached_to_menu_bar(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertEqual(controller.preview_settings_action.text(), "打开设置")
+        self.assertIn(controller.preview_settings_action, controller.preview_window.menuBar().actions())
+
+    def test_history_action_is_attached_to_menu_bar(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertEqual(controller.preview_history_action.text(), "历史版本")
+        self.assertIn(controller.preview_history_action, controller.preview_window.menuBar().actions())
+
+    def test_menu_bar_is_part_of_preview_window(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertEqual(controller.preview_window.menuBar().parent(), controller.preview_window)
+        self.assertIsNotNone(controller.preview_window.centralWidget())
+        self.assertEqual(controller.preview_window.centralWidget().parent(), controller.preview_window)
+
+    def test_preview_window_central_widget_has_main_layout(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        central_layout = controller.preview_window.centralWidget().layout()
+
+        self.assertIsNotNone(central_layout)
+        self.assertGreaterEqual(central_layout.count(), 4)
+        self.assertEqual(central_layout.itemAt(central_layout.count() - 1).layout(), controller.preview_button_layout)
+
+    def test_menu_bar_history_action_opens_history_dialog(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        controller.preview_history_action.trigger()
+
+        self.assertIsNotNone(controller.history_dialog)
+        self.assertTrue(controller.history_dialog.isVisible())
+        controller.history_dialog.close()
+        self.app.processEvents()
+
+    def test_menu_bar_settings_action_opens_settings_dialog(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        fake_dialog = MagicMock()
+        fake_dialog.exec_.return_value = fake_dialog.Rejected
+
+        with patch.object(controller, "open_settings_dialog_for_test", return_value=fake_dialog) as open_dialog:
+            controller.preview_settings_action.trigger()
+
+        open_dialog.assert_called_once()
+        fake_dialog.exec_.assert_called_once()
+
+    def test_history_dialog_reloads_markdown_from_shared_source(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        dialog = controller.show_history_dialog()
+
+        self.assertIn("# 更新历史", dialog.toMarkdown())
+        dialog.close()
+        self.app.processEvents()
+
+    def test_preview_window_has_no_embedded_history_view(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertFalse(hasattr(controller, "preview_history_view"))
+
+    def test_tray_menu_exposes_history_action(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertEqual(controller.tray_icon.history_action.text(), "历史版本")
+
+    def test_history_action_opens_history_dialog(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        dialog = controller.show_history_dialog()
+
+        self.assertIsNotNone(dialog)
+        self.assertEqual(dialog.windowTitle(), "历史版本")
+        self.assertTrue(dialog.isReadOnly())
+        self.assertIn("# 更新历史", dialog.toMarkdown())
+        dialog.close()
+        self.app.processEvents()
+
+    def test_tray_history_action_opens_history_dialog(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        controller.tray_icon.history_action.trigger()
+
+        self.assertIsNotNone(controller.history_dialog)
+        self.assertTrue(controller.history_dialog.isVisible())
+        controller.history_dialog.close()
+        self.app.processEvents()
+
+    def test_double_clicking_tray_icon_shows_main_page(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.preview_window.show = MagicMock()
+        controller.preview_window.raise_ = MagicMock()
+        controller.preview_window.activateWindow = MagicMock()
+
+        controller.tray_icon.activated.emit(QSystemTrayIcon.DoubleClick)
+
+        controller.preview_window.show.assert_called_once()
+        controller.preview_window.raise_.assert_called_once()
+        controller.preview_window.activateWindow.assert_called_once()
+
+    def test_history_dialog_shows_default_message_when_file_is_missing(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.history_markdown_path = PROJECT_ROOT / "res" / "missing_version_history.md"
+
+        dialog = controller.show_history_dialog()
+
+        self.assertIn("暂无历史版本记录", dialog.toPlainText())
+        self.assertTrue(dialog.isReadOnly())
+        dialog.close()
+        self.app.processEvents()
+
+    def test_history_dialog_reuses_existing_visible_window(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        first_dialog = controller.show_history_dialog()
+        second_dialog = controller.show_history_dialog()
+
+        self.assertIs(first_dialog, second_dialog)
+        first_dialog.close()
+        self.app.processEvents()
+
+    def test_settings_dialog_uses_single_row_time_inputs_layout(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        dialog = controller.open_settings_dialog_for_test()
+
+        self.assertEqual(dialog.time_input_layout.count(), 6)
+        self.assertEqual(dialog.time_input_layout.itemAt(0).widget(), dialog.hours_input)
+        self.assertEqual(dialog.time_input_layout.itemAt(1).widget(), dialog.hours_unit_label)
+        self.assertEqual(dialog.time_input_layout.itemAt(2).widget(), dialog.minutes_input)
+        self.assertEqual(dialog.time_input_layout.itemAt(3).widget(), dialog.minutes_unit_label)
+        self.assertEqual(dialog.time_input_layout.itemAt(4).widget(), dialog.seconds_input)
+        self.assertEqual(dialog.time_input_layout.itemAt(5).widget(), dialog.seconds_unit_label)
+        self.assertEqual(dialog.time_form_layout.rowCount(), 1)
+        dialog.close()
+
+    def test_history_markdown_path_points_to_res_directory(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertEqual(controller.history_markdown_path, PROJECT_ROOT / "res" / "version_history.md")
+        self.assertEqual(controller.history_markdown_path.name, "version_history.md")
+        self.assertEqual(controller.history_markdown_path.parent.name, "res")
+
+    def test_due_state_opens_full_screen_green_reminder_overlay(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.start()
+        controller.scheduler.next_due_ts = 100
+        controller.scheduler.is_snoozed = False
+        controller._now_ts = MagicMock(return_value=100)
+
+        controller._check_due()
+        self.app.processEvents()
+
+        screen_geometry = self.app.primaryScreen().geometry()
+
+        self.assertIsNotNone(controller.reminder_dialog)
+        self.assertTrue(controller.reminder_dialog.windowState() & Qt.WindowFullScreen)
+        self.assertEqual(controller.reminder_dialog.geometry(), screen_geometry)
+        self.assertEqual(controller.reminder_dialog.frameGeometry(), screen_geometry)
+        self.assertTrue(controller.reminder_dialog.windowFlags() & Qt.WindowStaysOnTopHint)
+        self.assertTrue(controller.reminder_dialog.has_grass_image())
+        self.assertTrue(controller.reminder_dialog.image_label.pixmap() is not None)
+        self.assertTrue(controller.reminder_dialog.testAttribute(Qt.WA_DeleteOnClose))
+        self.assertTrue(controller.reminder_dialog.click_to_close_enabled())
+        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["is_full_screen"])
+        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["is_visible"])
+        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["stays_on_top"])
+        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["has_image"])
+        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["click_to_close_enabled"])
+        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["has_green_style"])
+        self.assertEqual(controller.reminder_dialog.windowTitle(), "久坐提醒")
+        self.assertTrue(controller.reminder_dialog.testAttribute(Qt.WA_TranslucentBackground))
+        self.assertTrue(controller.reminder_dialog.testAttribute(Qt.WA_DeleteOnClose))
+        self.assertEqual(controller.preview_status_label.text(), "现在该起来活动了")
+        self.assertEqual(controller.preview_countdown_label.text(), "00:00")
+        self.assertEqual(
+            controller.reminder_dialog.runtime_overlay_snapshot()["geometry"],
+            screen_geometry.getRect(),
+        )
+        self.assertEqual(
+            controller.reminder_dialog.runtime_overlay_snapshot()["frame_geometry"],
+            screen_geometry.getRect(),
+        )
+
+    def test_reminder_overlay_click_restarts_full_interval(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.start()
+        controller.scheduler.next_due_ts = 100
+        controller._now_ts = MagicMock(side_effect=[100, 150])
+
+        controller._check_due()
+        controller.reminder_dialog.action_selected.emit("complete")
+
+        self.assertIsNone(controller.reminder_dialog)
+        self.assertEqual(controller.scheduler.next_due_ts, 150 + controller.scheduler.configured_duration_seconds)
+        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
+        self.assertFalse(controller.scheduler.is_snoozed)
+        self.assertFalse(controller.scheduler.is_paused)
+        self.assertTrue(controller.scheduler.is_running)
+
+    def test_reminder_dialog_shows_grass_image(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        dialog = controller.show_reminder_preview()
+        snapshot = dialog.runtime_overlay_snapshot()
+
+        self.assertTrue(dialog.has_grass_image())
+        self.assertIsNotNone(dialog.image_label.pixmap())
+        self.assertTrue(dialog.click_to_close_enabled())
+        self.assertEqual(dialog.windowTitle(), "久坐提醒")
+        self.assertIsNone(dialog.get_action())
+        self.assertIsNone(dialog.result())
+        self.assertEqual(dialog.image_label.objectName(), "grassImageLabel")
+        self.assertEqual(dialog.image_label.parent(), dialog)
+        self.assertTrue(dialog.testAttribute(Qt.WA_TranslucentBackground))
+        self.assertTrue(dialog.testAttribute(Qt.WA_DeleteOnClose))
+        self.assertTrue(dialog.windowFlags() & Qt.WindowStaysOnTopHint)
+        self.assertTrue(dialog.windowFlags() & Qt.FramelessWindowHint)
+        self.assertTrue(dialog.windowFlags() & Qt.Tool)
+        self.assertTrue(dialog.windowFlags() & Qt.Window)
+        self.assertEqual(dialog.windowState() & Qt.WindowFullScreen, Qt.WindowFullScreen)
+        self.assertIn("grassImageLabel", dialog.styleSheet())
+        self.assertIn("rgba(34, 197, 94, 180)", dialog.styleSheet())
+        self.assertEqual(dialog.geometry(), self.app.primaryScreen().geometry())
+        self.assertEqual(dialog.frameGeometry(), self.app.primaryScreen().geometry())
+        self.assertTrue(snapshot["has_image"])
+        self.assertTrue(snapshot["click_to_close_enabled"])
+        self.assertTrue(snapshot["has_green_style"])
+        self.assertTrue(snapshot["stays_on_top"])
+        self.assertTrue(snapshot["is_full_screen"])
+        self.assertTrue(snapshot["is_visible"])
+        self.assertEqual(snapshot["geometry"], self.app.primaryScreen().geometry().getRect())
+        self.assertEqual(snapshot["frame_geometry"], self.app.primaryScreen().geometry().getRect())
+
+    def test_reminder_dialog_shows_due_state_message(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        dialog = controller.show_reminder_preview()
+
+        self.assertTrue(dialog.has_grass_image())
+        self.assertIsNotNone(dialog.image_label.pixmap())
+        self.assertIsNone(dialog.get_action())
+        self.assertIsNone(dialog.result())
+        self.assertFalse(hasattr(dialog, "status_label"))
+        self.assertFalse(hasattr(dialog, "message_label"))
+        self.assertFalse(hasattr(dialog, "close_button"))
+        self.assertFalse(hasattr(dialog, "snooze_button"))
+        self.assertFalse(dialog.inherits("QDialog"))
+        self.assertTrue(dialog.inherits("QWidget"))
+        self.assertTrue(dialog.runtime_overlay_snapshot()["has_image"])
+        self.assertTrue(dialog.runtime_overlay_snapshot()["click_to_close_enabled"])
+        self.assertTrue(dialog.runtime_overlay_snapshot()["is_full_screen"])
+        self.assertTrue(dialog.runtime_overlay_snapshot()["is_visible"])
+        self.assertEqual(dialog.geometry(), self.app.primaryScreen().geometry())
+        self.assertEqual(dialog.frameGeometry(), self.app.primaryScreen().geometry())
+        self.assertEqual(dialog.windowTitle(), "久坐提醒")
+        self.assertEqual(dialog.image_label.objectName(), "grassImageLabel")
+        self.assertTrue(dialog.click_to_close_enabled())
+        self.assertTrue(dialog.windowFlags() & Qt.WindowStaysOnTopHint)
+        self.assertEqual(dialog.windowState() & Qt.WindowFullScreen, Qt.WindowFullScreen)
+        self.assertTrue(dialog.testAttribute(Qt.WA_TranslucentBackground))
+        self.assertTrue(dialog.testAttribute(Qt.WA_DeleteOnClose))
+        self.assertFalse(dialog.autoFillBackground())
+        self.assertIn("grassImageLabel", dialog.styleSheet())
+        self.assertIn("rgba(34, 197, 94, 180)", dialog.styleSheet())
+        self.assertEqual(dialog.runtime_overlay_snapshot()["geometry"], self.app.primaryScreen().geometry().getRect())
+        self.assertEqual(dialog.runtime_overlay_snapshot()["frame_geometry"], self.app.primaryScreen().geometry().getRect())
+        self.assertTrue(hasattr(dialog, "image_label"))
+        self.assertTrue(hasattr(dialog, "action_selected"))
+        self.assertTrue(hasattr(dialog, "Accepted"))
+        self.assertTrue(callable(dialog.get_action))
+        self.assertTrue(callable(dialog.runtime_overlay_snapshot))
+        self.assertTrue(callable(dialog.has_grass_image))
+        self.assertTrue(callable(dialog.click_to_close_enabled))
+        self.assertTrue(callable(dialog.mousePressEvent))
+        self.assertTrue(callable(dialog.resizeEvent))
+        self.assertTrue(callable(dialog.showEvent))
+        self.assertTrue(callable(dialog._apply_primary_screen_geometry))
+        self.assertTrue(callable(dialog._refresh_scaled_pixmap))
+
+    def test_open_settings_refreshes_countdown_after_interval_change(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.start()
+        controller._now_ts = MagicMock(return_value=100)
+        controller.config.save = MagicMock()
+
+        fake_dialog = MagicMock()
+        fake_dialog.exec_.return_value = fake_dialog.Accepted
+        fake_dialog.get_interval_seconds.return_value = 45 * 60
+
+        with patch("app_controller.SettingsDialog", return_value=fake_dialog):
+            controller.open_settings()
+
+        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
+        self.assertEqual(controller.config.interval_seconds, 2700)
+        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
+        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
+        self.assertEqual(controller.scheduler.next_due_ts, 2800)
+        self.assertTrue(controller.scheduler.is_running)
+        self.assertFalse(controller.scheduler.is_paused)
+        self.assertFalse(controller.scheduler.is_snoozed)
+        controller.config.save.assert_called_once_with(controller.config_path)
+        fake_dialog.get_interval_seconds.assert_called_once()
+
+    def test_preview_window_exposes_reminder_actions_and_menu_bar(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
 
         controller.start()
 
-        self.assertIsNotNone(controller.preview_settings_button)
+        self.assertIsNotNone(controller.preview_window.menuBar())
+        self.assertIsNotNone(controller.preview_settings_action)
+        self.assertIsNotNone(controller.preview_history_action)
         self.assertIsNotNone(controller.preview_reminder_button)
-        self.assertEqual(controller.preview_settings_button.text(), "打开设置")
         self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
         self.assertEqual(controller.preview_start_button.text(), "开始")
         self.assertEqual(controller.preview_pause_button.text(), "暂停")
@@ -72,21 +430,20 @@ class AppControllerTest(unittest.TestCase):
         self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
         self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
         self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertIsNotNone(controller.preview_window.layout())
-        self.assertGreaterEqual(controller.preview_window.layout().count(), 5)
+        self.assertEqual(controller.preview_window.windowTitle(), f"久坐提醒 v{APP_VERSION}")
+        self.assertIsNotNone(controller.preview_window.centralWidget())
+        self.assertIsNotNone(controller.preview_window.centralWidget().layout())
+        self.assertGreaterEqual(controller.preview_window.centralWidget().layout().count(), 4)
+        self.assertIsNotNone(controller.preview_button_layout)
         self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
         self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
         self.assertTrue(controller.preview_start_button.isEnabled())
         self.assertTrue(controller.preview_pause_button.isEnabled())
         self.assertTrue(controller.preview_reset_button.isEnabled())
-        self.assertEqual(controller.preview_start_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_pause_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_reset_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_settings_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_reminder_button.parent(), controller.preview_window)
+        self.assertEqual(controller.preview_start_button.parent(), controller.preview_window.centralWidget())
+        self.assertEqual(controller.preview_pause_button.parent(), controller.preview_window.centralWidget())
+        self.assertEqual(controller.preview_reset_button.parent(), controller.preview_window.centralWidget())
+        self.assertEqual(controller.preview_reminder_button.parent(), controller.preview_window.centralWidget())
         self.assertTrue(isinstance(controller.preview_start_button.text(), str))
         self.assertTrue(isinstance(controller.preview_pause_button.text(), str))
         self.assertTrue(isinstance(controller.preview_reset_button.text(), str))
@@ -99,9 +456,9 @@ class AppControllerTest(unittest.TestCase):
         self.assertGreaterEqual(controller.preview_window.minimumWidth(), 420)
         self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
         self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertIn("QPushButton", controller.preview_window.styleSheet())
-        self.assertIn("#primaryActionButton", controller.preview_window.styleSheet())
-        self.assertIn("#secondaryActionButton", controller.preview_window.styleSheet())
+        self.assertIn("QPushButton", controller.preview_window.centralWidget().styleSheet())
+        self.assertIn("#primaryActionButton", controller.preview_window.centralWidget().styleSheet())
+        self.assertIn("#secondaryActionButton", controller.preview_window.centralWidget().styleSheet())
 
     def test_pause_button_freezes_remaining_time(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -142,350 +499,6 @@ class AppControllerTest(unittest.TestCase):
         self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
         self.assertEqual(controller.scheduler.next_due_ts, 3823)
         fake_dialog.get_interval_seconds.assert_called_once()
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertIsNotNone(controller.preview_window.layout())
-        self.assertTrue(controller.preview_start_button.isEnabled())
-        self.assertTrue(controller.preview_pause_button.isEnabled())
-        self.assertTrue(controller.preview_reset_button.isEnabled())
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
-        self.assertEqual(controller.preview_reset_button.text(), "重置")
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertEqual(controller.preview_settings_button.text(), "打开设置")
-        self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_countdown_label.text().strip(), "62:03")
-        self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertGreaterEqual(controller.preview_window.minimumWidth(), 420)
-        self.assertIn("QPushButton", controller.preview_window.styleSheet())
-        self.assertIn("#primaryActionButton", controller.preview_window.styleSheet())
-        self.assertIn("#secondaryActionButton", controller.preview_window.styleSheet())
-        self.assertTrue(controller.scheduler.remaining_seconds >= 3723)
-        self.assertFalse(controller.preview_window.isMinimized())
-        self.assertEqual(controller.config_path.name, "config.json")
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.preview_status_label.text().strip(), "距离下次提醒")
-        self.assertTrue(isinstance(controller.preview_countdown_label.text(), str))
-        self.assertEqual(controller.config.interval_seconds, 3723)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 3723)
-        self.assertEqual(controller.scheduler.next_due_ts, 3823)
-        self.assertEqual(controller.scheduler.remaining_seconds, 3723)
-        self.assertEqual(controller.preview_countdown_label.text(), "62:03")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertTrue(controller.preview_start_button.isEnabled())
-        self.assertTrue(controller.preview_pause_button.isEnabled())
-        self.assertTrue(controller.preview_reset_button.isEnabled())
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
-        self.assertEqual(controller.preview_reset_button.text(), "重置")
-        self.assertEqual(controller.preview_settings_button.text(), "打开设置")
-        self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertGreater(controller.preview_window.layout().count(), 0)
-        self.assertIn("QWidget#previewWindow", controller.preview_window.styleSheet())
-        self.assertTrue(controller.preview_window.styleSheet())
-        self.assertFalse(controller.preview_window.isHidden())
-        self.assertEqual(controller.preview_window.parent(), None)
-        self.assertEqual(controller.preview_start_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_pause_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_reset_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_settings_button.parent(), controller.preview_window)
-        self.assertEqual(controller.preview_reminder_button.parent(), controller.preview_window)
-        self.assertTrue(isinstance(controller.preview_status_label.text(), str))
-        self.assertTrue(isinstance(controller.preview_countdown_label.text(), str))
-        self.assertTrue(isinstance(controller.preview_start_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_pause_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reset_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_settings_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reminder_button.text(), str))
-        self.assertEqual(controller.preview_countdown_label.text().split(":")[0], "62")
-        self.assertEqual(controller.preview_countdown_label.text().split(":")[1], "03")
-        self.assertEqual(controller.scheduler.remaining_seconds, 3723)
-        self.assertEqual(controller.scheduler.next_due_ts, 3823)
-        self.assertEqual(controller.config.interval_seconds, 3723)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 3723)
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.preview_countdown_label.text(), "62:03")
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertFalse(controller.preview_window.isMinimized())
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertTrue(controller.preview_window.styleSheet())
-        self.assertGreaterEqual(controller.preview_window.layout().count(), 5)
-        self.assertIsNotNone(controller.preview_window.layout())
-        self.assertEqual(controller.preview_window.layout().itemAt(1).widget(), controller.preview_status_label)
-        self.assertEqual(controller.preview_window.layout().itemAt(2).widget(), controller.preview_countdown_label)
-        self.assertEqual(controller.preview_window.layout().itemAt(4).widget(), controller.preview_start_button)
-        self.assertEqual(controller.preview_window.layout().itemAt(5).widget(), controller.preview_pause_button)
-        self.assertEqual(controller.preview_window.layout().itemAt(6).widget(), controller.preview_reset_button)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().left(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().top(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().right(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().bottom(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().spacing(), 12)
-        self.assertGreaterEqual(controller.preview_start_button.minimumHeight(), 40)
-        self.assertGreaterEqual(controller.preview_pause_button.minimumHeight(), 40)
-        self.assertGreaterEqual(controller.preview_reset_button.minimumHeight(), 40)
-        self.assertEqual(controller.preview_countdown_label.text(), "62:03")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.next_due_ts, 3823)
-        self.assertEqual(controller.scheduler.remaining_seconds, 3723)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.config.interval_seconds, 3723)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 3723)
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertEqual(fake_dialog.exec_.call_count, 1)
-        self.assertEqual(fake_dialog.get_interval_seconds.call_count, 1)
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertFalse(controller.preview_window.isHidden())
-        self.assertFalse(controller.preview_window.isMinimized())
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertEqual(controller.preview_countdown_label.text(), "62:03")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.config.interval_seconds, 3723)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 3723)
-        self.assertEqual(controller.scheduler.remaining_seconds, 3723)
-        self.assertEqual(controller.scheduler.next_due_ts, 3823)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
-        self.assertEqual(controller.preview_reset_button.text(), "重置")
-        self.assertEqual(controller.preview_settings_button.text(), "打开设置")
-        self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertTrue(controller.preview_window.styleSheet())
-        self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertTrue(isinstance(controller.preview_countdown_label.text(), str))
-        self.assertTrue(isinstance(controller.preview_status_label.text(), str))
-        self.assertTrue(isinstance(controller.config.interval_seconds, int))
-        self.assertTrue(isinstance(controller.scheduler.configured_duration_seconds, int))
-        self.assertTrue(isinstance(controller.scheduler.remaining_seconds, int))
-        self.assertTrue(isinstance(controller.scheduler.next_due_ts, int))
-        self.assertTrue(isinstance(controller.scheduler.is_running, bool))
-        self.assertTrue(isinstance(controller.scheduler.is_paused, bool))
-        self.assertTrue(isinstance(controller.scheduler.is_snoozed, bool))
-        self.assertTrue(isinstance(controller.scheduler.snooze_seconds, int))
-        self.assertTrue(isinstance(controller.preview_window.windowTitle(), str))
-        self.assertTrue(isinstance(controller.preview_start_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_pause_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reset_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_settings_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reminder_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_status_label.text(), str))
-        self.assertTrue(isinstance(controller.preview_countdown_label.text(), str))
-        self.assertTrue(isinstance(controller.preview_window.styleSheet(), str))
-        self.assertTrue(isinstance(controller.preview_window.layout().count(), int))
-        self.assertTrue(isinstance(controller.preview_window.minimumWidth(), int))
-        self.assertTrue(isinstance(controller.config_path.name, str))
-        self.assertEqual(controller.config_path.name, "config.json")
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.preview_countdown_label.text(), "62:03")
-
-    def test_open_settings_refreshes_countdown_after_interval_change(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-        controller.start()
-        controller._now_ts = MagicMock(return_value=100)
-
-        fake_dialog = MagicMock()
-        fake_dialog.exec_.return_value = fake_dialog.Accepted
-        fake_dialog.get_interval_minutes.return_value = 45
-
-        with patch("app_controller.SettingsDialog", return_value=fake_dialog):
-            controller.open_settings()
-
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-
-    def test_tray_menu_exposes_show_main_page_action(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-
-        self.assertEqual(controller.tray_icon.show_main_page_action.text(), "显示主页面")
-
-    def test_preview_window_title_is_localized(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-
-    def test_preview_window_only_keeps_status_and_countdown_content(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-
-        self.assertFalse(hasattr(controller, "preview_title_label"))
-        self.assertFalse(hasattr(controller, "preview_hint_label"))
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-
-    def test_preview_window_uses_named_styles_for_key_widgets(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-
-    def test_preview_window_shows_initial_countdown_labels(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-
-        controller.start()
-
-        expected_minutes, expected_seconds = divmod(controller.config.interval_seconds, 60)
-        expected_label = f"{expected_minutes:02d}:{expected_seconds:02d}"
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.preview_countdown_label.text(), expected_label)
-        self.assertEqual(controller.scheduler.remaining_seconds, controller.config.interval_seconds)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertIsNotNone(controller.preview_window.layout())
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
-        self.assertEqual(controller.preview_reset_button.text(), "重置")
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertTrue(controller.preview_start_button.isEnabled())
-        self.assertTrue(controller.preview_pause_button.isEnabled())
-        self.assertTrue(controller.preview_reset_button.isEnabled())
-        self.assertGreaterEqual(controller.preview_window.layout().count(), 5)
-        self.assertIn("QWidget#previewWindow", controller.preview_window.styleSheet())
-        self.assertIn("QPushButton", controller.preview_window.styleSheet())
-        self.assertEqual(controller.preview_countdown_label.text(), expected_label)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.config.interval_seconds, controller.scheduler.configured_duration_seconds)
-        self.assertEqual(controller.scheduler.remaining_seconds, controller.config.interval_seconds)
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertFalse(controller.preview_window.isMinimized())
-        self.assertEqual(controller.config_path.name, "config.json")
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertEqual(controller.preview_countdown_label.text().split(":")[0], f"{expected_minutes:02d}")
-        self.assertEqual(controller.preview_countdown_label.text().split(":")[1], f"{expected_seconds:02d}")
-        self.assertTrue(isinstance(controller.config.interval_seconds, int))
-        self.assertTrue(isinstance(controller.scheduler.remaining_seconds, int))
-        self.assertTrue(isinstance(controller.preview_countdown_label.text(), str))
-        self.assertTrue(isinstance(controller.preview_status_label.text(), str))
-        self.assertGreaterEqual(controller.preview_window.minimumWidth(), 420)
-        self.assertGreaterEqual(controller.preview_window.layout().spacing(), 12)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().left(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().top(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().right(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().bottom(), 24)
-        self.assertGreaterEqual(controller.preview_start_button.minimumHeight(), 40)
-        self.assertGreaterEqual(controller.preview_pause_button.minimumHeight(), 40)
-        self.assertGreaterEqual(controller.preview_reset_button.minimumHeight(), 40)
-        self.assertEqual(controller.preview_window.layout().itemAt(1).widget(), controller.preview_status_label)
-        self.assertEqual(controller.preview_window.layout().itemAt(2).widget(), controller.preview_countdown_label)
-        self.assertTrue(controller.preview_window.styleSheet())
-        self.assertEqual(controller.preview_countdown_label.text(), expected_label)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.configured_duration_seconds, controller.config.interval_seconds)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.preview_start_button.text().strip(), "开始")
-        self.assertEqual(controller.preview_pause_button.text().strip(), "暂停")
-        self.assertEqual(controller.preview_reset_button.text().strip(), "重置")
-        self.assertEqual(controller.preview_settings_button.text().strip(), "打开设置")
-        self.assertEqual(controller.preview_reminder_button.text().strip(), "预览提醒弹窗")
-        self.assertEqual(controller.preview_window.windowTitle().strip(), "久坐提醒")
-        self.assertEqual(controller.preview_countdown_label.text(), expected_label)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.remaining_seconds, controller.config.interval_seconds)
-        self.assertIsNotNone(controller.preview_window.layout().itemAt(0))
-        self.assertIsNotNone(controller.preview_window.layout().itemAt(1))
-        self.assertIsNotNone(controller.preview_window.layout().itemAt(2))
-        self.assertGreaterEqual(controller.preview_window.layout().count(), 7)
-        self.assertFalse(controller.preview_window.isHidden())
-        self.assertEqual(controller.preview_window.parent(), None)
-        self.assertTrue(isinstance(controller.preview_window.windowTitle(), str))
-        self.assertTrue(isinstance(controller.preview_start_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_pause_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reset_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_settings_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reminder_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_window.styleSheet(), str))
-        self.assertTrue(isinstance(controller.preview_window.layout().count(), int))
-        self.assertEqual(controller.preview_countdown_label.text(), expected_label)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.remaining_seconds, controller.config.interval_seconds)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, controller.config.interval_seconds)
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertFalse(controller.preview_window.isHidden())
-        self.assertFalse(controller.preview_window.isMinimized())
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_countdown_label.text(), expected_label)
-        self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertEqual(controller.config_path.name, "config.json")
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_countdown_label.text(), expected_label)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.remaining_seconds, controller.config.interval_seconds)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, controller.config.interval_seconds)
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
 
     def test_countdown_updates_for_normal_and_snooze_states(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -500,129 +513,6 @@ class AppControllerTest(unittest.TestCase):
         controller._update_countdown_display(now_ts=100)
         self.assertEqual(controller.preview_status_label.text(), "稍后提醒剩余")
         self.assertEqual(controller.preview_countdown_label.text(), "00:30")
-
-        controller.scheduler.update_interval(interval_seconds=45 * 60, now_ts=100)
-        controller._update_countdown_display(now_ts=100)
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
-        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.scheduler.next_due_ts, 2800)
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
-        self.assertEqual(controller.preview_reset_button.text(), "重置")
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertIn("QPushButton", controller.preview_window.styleSheet())
-        self.assertEqual(controller.preview_countdown_label.text().split(":")[0], "45")
-        self.assertEqual(controller.preview_countdown_label.text().split(":")[1], "00")
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertTrue(isinstance(controller.scheduler.configured_duration_seconds, int))
-        self.assertTrue(isinstance(controller.scheduler.remaining_seconds, int))
-        self.assertTrue(isinstance(controller.scheduler.next_due_ts, int))
-        self.assertTrue(isinstance(controller.preview_countdown_label.text(), str))
-        self.assertGreaterEqual(controller.preview_window.layout().count(), 7)
-        self.assertIsNotNone(controller.preview_window.layout())
-        self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
-        self.assertEqual(controller.preview_countdown_label.objectName(), "previewCountdownLabel")
-        self.assertTrue(controller.preview_start_button.isEnabled())
-        self.assertTrue(controller.preview_pause_button.isEnabled())
-        self.assertTrue(controller.preview_reset_button.isEnabled())
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertGreaterEqual(controller.preview_window.minimumWidth(), 420)
-        self.assertGreaterEqual(controller.preview_window.layout().spacing(), 12)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().left(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().top(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().right(), 24)
-        self.assertGreaterEqual(controller.preview_window.layout().contentsMargins().bottom(), 24)
-        self.assertFalse(controller.preview_window.isMinimized())
-        self.assertFalse(controller.preview_window.isHidden())
-        self.assertEqual(controller.preview_settings_button.text(), "打开设置")
-        self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
-        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
-        self.assertEqual(controller.scheduler.next_due_ts, 2800)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertTrue(controller.preview_window.styleSheet())
-        self.assertTrue(isinstance(controller.preview_window.styleSheet(), str))
-        self.assertTrue(isinstance(controller.preview_window.windowTitle(), str))
-        self.assertEqual(controller.config_path.name, "config.json")
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
-        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
-        self.assertEqual(controller.scheduler.next_due_ts, 2800)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
-        self.assertEqual(controller.preview_reset_button.text(), "重置")
-        self.assertTrue(isinstance(controller.preview_start_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_pause_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reset_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_settings_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_reminder_button.text(), str))
-        self.assertEqual(controller.preview_window.layout().itemAt(1).widget(), controller.preview_status_label)
-        self.assertEqual(controller.preview_window.layout().itemAt(2).widget(), controller.preview_countdown_label)
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertTrue(controller.preview_window.isVisible())
-        self.assertFalse(controller.preview_window.isMinimized())
-        self.assertEqual(controller.preview_window.windowTitle(), "久坐提醒")
-        self.assertFalse(controller.preview_window.windowIcon().isNull())
-        self.assertTrue(controller.preview_window.styleSheet())
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.next_due_ts, 2800)
-        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
-        self.assertEqual(controller.scheduler.snooze_seconds, 300)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_settings_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_reminder_button.objectName(), "secondaryActionButton")
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
-        self.assertEqual(controller.scheduler.next_due_ts, 2800)
-        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        self.assertIsNone(controller.reminder_dialog)
-        self.assertTrue(controller.preview_window.isVisible())
 
     def test_due_state_shows_zero_countdown(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -650,50 +540,6 @@ class AppControllerTest(unittest.TestCase):
 
         self.assertEqual(first_value, "01:05")
         self.assertEqual(second_value, "01:04")
-
-    def test_reminder_dialog_shows_due_state_message(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-
-        dialog = controller.show_reminder_preview()
-
-        self.assertEqual(dialog.status_label.text(), "现在该起来活动了")
-
-    def test_open_settings_refreshes_countdown_after_interval_change(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-        controller.start()
-        controller._now_ts = MagicMock(return_value=100)
-        controller.config.save = MagicMock()
-
-        fake_dialog = MagicMock()
-        fake_dialog.exec_.return_value = fake_dialog.Accepted
-        fake_dialog.get_interval_seconds.return_value = 45 * 60
-
-        with patch("app_controller.SettingsDialog", return_value=fake_dialog):
-            controller.open_settings()
-
-        self.assertEqual(controller.preview_countdown_label.text(), "45:00")
-        self.assertEqual(controller.config.interval_seconds, 2700)
-        self.assertEqual(controller.scheduler.configured_duration_seconds, 2700)
-        self.assertEqual(controller.scheduler.remaining_seconds, 2700)
-        self.assertEqual(controller.scheduler.next_due_ts, 2800)
-        self.assertTrue(controller.scheduler.is_running)
-        self.assertFalse(controller.scheduler.is_paused)
-        self.assertFalse(controller.scheduler.is_snoozed)
-        controller.config.save.assert_called_once_with(controller.config_path)
-        fake_dialog.get_interval_seconds.assert_called_once()
-
-    def test_handle_dialog_finished_refreshes_snooze_countdown(self):
-        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
-        controller.start()
-        controller._now_ts = MagicMock(return_value=100)
-
-        controller.reminder_dialog = MagicMock()
-        controller.reminder_dialog.get_action.return_value = "snooze"
-
-        controller._handle_dialog_finished(0)
-
-        self.assertEqual(controller.preview_status_label.text(), "稍后提醒剩余")
-        self.assertEqual(controller.preview_countdown_label.text(), "05:00")
 
     def test_show_main_page_displays_preview_window(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)

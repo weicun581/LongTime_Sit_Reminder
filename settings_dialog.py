@@ -1,5 +1,5 @@
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
+from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QVBoxLayout, QWidget
 
 
 class SettingsDialog(QDialog):
@@ -7,7 +7,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("设置提醒间隔")
         self._interval_seconds = interval_seconds
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(300)
         self.setStyleSheet(
             """
             QDialog {
@@ -63,16 +63,26 @@ class SettingsDialog(QDialog):
         self.hours_input.setPlaceholderText("小时")
         self.hours_input.setObjectName("settingsHoursInput")
         self.hours_input.setAlignment(Qt.AlignLeft)
+        self.hours_input.setMaximumWidth(70)
 
         self.minutes_input = QLineEdit(str(minutes), self)
         self.minutes_input.setPlaceholderText("分钟")
         self.minutes_input.setObjectName("settingsMinutesInput")
         self.minutes_input.setAlignment(Qt.AlignLeft)
+        self.minutes_input.setMaximumWidth(70)
 
         self.seconds_input = QLineEdit(str(seconds), self)
         self.seconds_input.setPlaceholderText("秒")
         self.seconds_input.setObjectName("settingsSecondsInput")
         self.seconds_input.setAlignment(Qt.AlignLeft)
+        self.seconds_input.setMaximumWidth(70)
+
+        self.hours_unit_label = QLabel("小时", self)
+        self.minutes_unit_label = QLabel("分钟", self)
+        self.seconds_unit_label = QLabel("秒", self)
+        self.hours_unit_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.minutes_unit_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.seconds_unit_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
 
         self.error_label = QLabel("", self)
         self.error_label.setObjectName("settingsErrorLabel")
@@ -96,15 +106,24 @@ class SettingsDialog(QDialog):
         self.button_box.accepted.connect(self.try_accept)
         self.button_box.rejected.connect(self.reject)
 
-        form_layout = QFormLayout()
-        form_layout.addRow("小时", self.hours_input)
-        form_layout.addRow("分钟", self.minutes_input)
-        form_layout.addRow("秒", self.seconds_input)
+        self.time_input_container = QWidget(self)
+        self.time_input_layout = QHBoxLayout(self.time_input_container)
+        self.time_input_layout.setContentsMargins(0, 0, 0, 0)
+        self.time_input_layout.setSpacing(12)
+        self.time_input_layout.addWidget(self.hours_input)
+        self.time_input_layout.addWidget(self.hours_unit_label)
+        self.time_input_layout.addWidget(self.minutes_input)
+        self.time_input_layout.addWidget(self.minutes_unit_label)
+        self.time_input_layout.addWidget(self.seconds_input)
+        self.time_input_layout.addWidget(self.seconds_unit_label)
+
+        self.time_form_layout = QFormLayout()
+        self.time_form_layout.addRow("时间", self.time_input_container)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
-        layout.addLayout(form_layout)
+        layout.addLayout(self.time_form_layout)
         layout.addWidget(self.error_label)
         layout.addWidget(self.button_box)
 
