@@ -1,7 +1,7 @@
 import pathlib
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QCloseEvent, QIcon
@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app_controller import APP_VERSION, AppController
 
 
-EXPECTED_VERSION = "0.2.0"
+EXPECTED_VERSION = "0.3.0"
 
 
 class AppControllerTest(unittest.TestCase):
@@ -103,14 +103,26 @@ class AppControllerTest(unittest.TestCase):
         menu_actions = controller.preview_window.menuBar().actions()
         menu_texts = [action.text() for action in menu_actions]
 
-        self.assertIn("打开设置", menu_texts)
+        self.assertIn("设置", menu_texts)
         self.assertIn("历史版本", menu_texts)
 
     def test_settings_action_is_attached_to_menu_bar(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
 
-        self.assertEqual(controller.preview_settings_action.text(), "打开设置")
+        self.assertEqual(controller.preview_settings_action.text(), "设置")
         self.assertIn(controller.preview_settings_action, controller.preview_window.menuBar().actions())
+
+    def test_settings_action_opens_settings_panel_window(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        panel = controller.show_settings_panel()
+
+        self.assertIsNotNone(panel)
+        self.assertEqual(panel.windowTitle(), "设置")
+        self.assertEqual(panel.timer_button.text(), "计时器")
+        self.assertEqual(panel.background_button.text(), "更换提醒背景")
+        panel.close()
+        self.app.processEvents()
 
     def test_history_action_is_attached_to_menu_bar(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -144,17 +156,15 @@ class AppControllerTest(unittest.TestCase):
         controller.history_dialog.close()
         self.app.processEvents()
 
-    def test_menu_bar_settings_action_opens_settings_dialog(self):
+    def test_menu_bar_settings_action_opens_settings_panel_window(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
 
-        fake_dialog = MagicMock()
-        fake_dialog.exec_.return_value = fake_dialog.Rejected
+        controller.preview_settings_action.trigger()
 
-        with patch.object(controller, "open_settings_dialog_for_test", return_value=fake_dialog) as open_dialog:
-            controller.preview_settings_action.trigger()
-
-        open_dialog.assert_called_once()
-        fake_dialog.exec_.assert_called_once()
+        self.assertIsNotNone(controller.settings_panel)
+        self.assertTrue(controller.settings_panel.isVisible())
+        controller.settings_panel.close()
+        self.app.processEvents()
 
     def test_history_dialog_reloads_markdown_from_shared_source(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -278,7 +288,7 @@ class AppControllerTest(unittest.TestCase):
         self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["stays_on_top"])
         self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["has_image"])
         self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["click_to_close_enabled"])
-        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["has_green_style"])
+        self.assertTrue(controller.reminder_dialog.runtime_overlay_snapshot()["has_translucent_style"])
         self.assertEqual(controller.reminder_dialog.windowTitle(), "久坐提醒")
         self.assertTrue(controller.reminder_dialog.testAttribute(Qt.WA_TranslucentBackground))
         self.assertTrue(controller.reminder_dialog.testAttribute(Qt.WA_DeleteOnClose))
@@ -330,13 +340,15 @@ class AppControllerTest(unittest.TestCase):
         self.assertTrue(dialog.windowFlags() & Qt.Tool)
         self.assertTrue(dialog.windowFlags() & Qt.Window)
         self.assertEqual(dialog.windowState() & Qt.WindowFullScreen, Qt.WindowFullScreen)
+        self.assertIsNotNone(dialog.overlay_label)
+        self.assertFalse(dialog.overlay_label.isHidden())
+        self.assertEqual(dialog.overlay_label.geometry(), dialog.rect())
         self.assertIn("grassImageLabel", dialog.styleSheet())
-        self.assertIn("rgba(34, 197, 94, 180)", dialog.styleSheet())
         self.assertEqual(dialog.geometry(), self.app.primaryScreen().geometry())
         self.assertEqual(dialog.frameGeometry(), self.app.primaryScreen().geometry())
         self.assertTrue(snapshot["has_image"])
         self.assertTrue(snapshot["click_to_close_enabled"])
-        self.assertTrue(snapshot["has_green_style"])
+        self.assertTrue(snapshot["has_translucent_style"])
         self.assertTrue(snapshot["stays_on_top"])
         self.assertTrue(snapshot["is_full_screen"])
         self.assertTrue(snapshot["is_visible"])
@@ -373,7 +385,8 @@ class AppControllerTest(unittest.TestCase):
         self.assertTrue(dialog.testAttribute(Qt.WA_DeleteOnClose))
         self.assertFalse(dialog.autoFillBackground())
         self.assertIn("grassImageLabel", dialog.styleSheet())
-        self.assertIn("rgba(34, 197, 94, 180)", dialog.styleSheet())
+        self.assertIn("overlayLabel", dialog.styleSheet())
+        self.assertIn("rgba(34, 197, 94, 110)", dialog.styleSheet())
         self.assertEqual(dialog.runtime_overlay_snapshot()["geometry"], self.app.primaryScreen().geometry().getRect())
         self.assertEqual(dialog.runtime_overlay_snapshot()["frame_geometry"], self.app.primaryScreen().geometry().getRect())
         self.assertTrue(hasattr(dialog, "image_label"))
@@ -389,18 +402,13 @@ class AppControllerTest(unittest.TestCase):
         self.assertTrue(callable(dialog._apply_primary_screen_geometry))
         self.assertTrue(callable(dialog._refresh_scaled_pixmap))
 
-    def test_open_settings_refreshes_countdown_after_interval_change(self):
+    def test_apply_interval_change_refreshes_countdown_after_interval_change(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
         controller.start()
         controller._now_ts = MagicMock(return_value=100)
         controller.config.save = MagicMock()
 
-        fake_dialog = MagicMock()
-        fake_dialog.exec_.return_value = fake_dialog.Accepted
-        fake_dialog.get_interval_seconds.return_value = 45 * 60
-
-        with patch("app_controller.SettingsDialog", return_value=fake_dialog):
-            controller.open_settings()
+        controller.apply_interval_seconds(45 * 60)
 
         self.assertEqual(controller.preview_countdown_label.text(), "45:00")
         self.assertEqual(controller.config.interval_seconds, 2700)
@@ -411,7 +419,6 @@ class AppControllerTest(unittest.TestCase):
         self.assertFalse(controller.scheduler.is_paused)
         self.assertFalse(controller.scheduler.is_snoozed)
         controller.config.save.assert_called_once_with(controller.config_path)
-        fake_dialog.get_interval_seconds.assert_called_once()
 
     def test_preview_window_exposes_reminder_actions_and_menu_bar(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -479,17 +486,12 @@ class AppControllerTest(unittest.TestCase):
         self.assertIsNone(controller.scheduler.next_due_ts)
         self.assertIsNone(controller.reminder_dialog)
 
-    def test_open_settings_applies_second_based_duration(self):
+    def test_apply_interval_seconds_applies_second_based_duration(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
         controller.start()
         controller._now_ts = MagicMock(return_value=100)
 
-        fake_dialog = MagicMock()
-        fake_dialog.exec_.return_value = fake_dialog.Accepted
-        fake_dialog.get_interval_seconds.return_value = 3723
-
-        with patch("app_controller.SettingsDialog", return_value=fake_dialog):
-            controller.open_settings()
+        controller.apply_interval_seconds(3723)
 
         self.assertEqual(controller.preview_countdown_label.text(), "62:03")
         self.assertEqual(controller.config.interval_seconds, 3723)
@@ -498,7 +500,6 @@ class AppControllerTest(unittest.TestCase):
         self.assertFalse(controller.scheduler.is_paused)
         self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
         self.assertEqual(controller.scheduler.next_due_ts, 3823)
-        fake_dialog.get_interval_seconds.assert_called_once()
 
     def test_countdown_updates_for_normal_and_snooze_states(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)

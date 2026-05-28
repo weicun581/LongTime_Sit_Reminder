@@ -10,6 +10,7 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from config import AppConfig
 from reminder_dialog import ReminderDialog
 from settings_dialog import SettingsDialog
 
@@ -108,6 +109,12 @@ class SettingsDialogTest(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual(dialog.error_label.text(), "请输入非负整数")
 
+    def test_config_defaults_include_background_and_ini_support(self):
+        config = AppConfig.load(PROJECT_ROOT / "missing_config.ini")
+
+        self.assertEqual(config.interval_seconds, 3600)
+        self.assertEqual(config.background_key, "image1")
+
     def test_reminder_dialog_uses_named_widgets_for_polish(self):
         dialog = ReminderDialog()
 
@@ -129,9 +136,14 @@ class SettingsDialogTest(unittest.TestCase):
         self.assertIn("QWidget", dialog.styleSheet())
         self.assertIn("grassImageLabel", dialog.styleSheet())
         self.assertEqual(dialog.image_label.parent(), dialog)
+        self.assertEqual(dialog.overlay_label.parent(), dialog)
+        self.assertFalse(dialog.overlay_label.isHidden())
+        self.assertEqual(dialog.overlay_label.geometry(), dialog.rect())
         self.assertTrue(dialog.runtime_overlay_snapshot()["has_image"])
         self.assertTrue(dialog.runtime_overlay_snapshot()["click_to_close_enabled"])
-        self.assertTrue(dialog.runtime_overlay_snapshot()["has_green_style"])
+        self.assertTrue(dialog.runtime_overlay_snapshot()["has_translucent_style"])
+        self.assertTrue(dialog.runtime_overlay_snapshot()["has_overlay_label"])
+        self.assertEqual(dialog.selected_background_key(), "image1")
 
     def test_reminder_dialog_click_marks_complete_action(self):
         dialog = ReminderDialog()
@@ -180,7 +192,9 @@ class SettingsDialogTest(unittest.TestCase):
         self.assertEqual(dialog.windowState() & Qt.WindowFullScreen, Qt.WindowFullScreen)
         self.assertEqual(snapshot["has_image"], dialog.has_grass_image())
         self.assertTrue(snapshot["click_to_close_enabled"])
-        self.assertTrue(snapshot["has_green_style"])
+        self.assertTrue(snapshot["has_translucent_style"])
+        self.assertTrue(snapshot["has_overlay_label"])
+        self.assertEqual(snapshot["background_key"], "image1")
         self.assertEqual(len(snapshot["geometry"]), 4)
         self.assertEqual(len(snapshot["frame_geometry"]), 4)
 

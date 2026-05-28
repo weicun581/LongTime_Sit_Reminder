@@ -18,13 +18,14 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 from config import AppConfig
 from history_dialog import HistoryDialog
 from reminder_dialog import ReminderDialog
 from reminder_scheduler import ReminderScheduler
 from settings_dialog import SettingsDialog
+from settings_panel import SettingsPanel
 from tray_icon import TrayIcon
 
 
@@ -33,7 +34,7 @@ class AppController(QObject):
         super().__init__()
         self.app = app
         self.base_dir = Path(base_dir)
-        self.config_path = self.base_dir / "config.json"
+        self.config_path = self.base_dir / "config.ini"
         self.config = AppConfig.load(self.config_path)
         self.scheduler = ReminderScheduler(
             interval_seconds=self.config.interval_seconds,
@@ -41,6 +42,7 @@ class AppController(QObject):
         )
         self.reminder_dialog = None
         self.history_dialog = None
+        self.settings_panel = None
         self.history_markdown_path = self.base_dir / "res" / "version_history.md"
 
         self.check_timer = QTimer(self)
@@ -53,7 +55,7 @@ class AppController(QObject):
         self.tray_icon = TrayIcon(self._build_icon(), parent=None)
         self.tray_icon.setToolTip("Long Sit Reminder")
         self.tray_icon.show_main_page_action.triggered.connect(self.show_main_page)
-        self.tray_icon.settings_action.triggered.connect(self.open_settings)
+        self.tray_icon.settings_action.triggered.connect(self.show_settings_panel)
         self.tray_icon.history_action.triggered.connect(self.show_history_dialog)
         self.tray_icon.exit_action.triggered.connect(self.quit_app)
         self.tray_icon.set_double_click_handler(self.show_main_page)
@@ -120,8 +122,8 @@ class AppController(QObject):
         )
         window.setCentralWidget(central_widget)
 
-        self.preview_settings_action = QAction("打开设置", window)
-        self.preview_settings_action.triggered.connect(self.open_settings)
+        self.preview_settings_action = QAction("设置", window)
+        self.preview_settings_action.triggered.connect(self.show_settings_panel)
         self.preview_history_action = QAction("历史版本", window)
         self.preview_history_action.triggered.connect(self.show_history_dialog)
         window.menuBar().addAction(self.preview_settings_action)
@@ -221,16 +223,36 @@ class AppController(QObject):
     def open_settings_dialog_for_test(self):
         return SettingsDialog(interval_seconds=self.config.interval_seconds)
 
-    def open_settings(self):
-        dialog = self.open_settings_dialog_for_test()
-        if dialog.exec_() != dialog.Accepted:
-            return
-
-        self.config.interval_seconds = dialog.get_interval_seconds()
+    def apply_interval_seconds(self, interval_seconds):
+        self.config.interval_seconds = interval_seconds
         self.config.save(self.config_path)
         now_ts = self._now_ts()
         self.scheduler.update_interval(self.config.interval_seconds, now_ts=now_ts)
         self._update_countdown_display(now_ts=now_ts)
+
+    def apply_background_key(self, background_key):
+        self.config.background_key = background_key
+        self.config.save(self.config_path)
+
+    def show_settings_panel(self):
+        if self.settings_panel is not None and self.settings_panel.isVisible():
+            self.settings_panel.raise_()
+            self.settings_panel.activateWindow()
+            return self.settings_panel
+
+        self.settings_panel = SettingsPanel(
+            interval_seconds=self.config.interval_seconds,
+            background_key=self.config.background_key,
+        )
+        self.settings_panel.interval_changed.connect(self.apply_interval_seconds)
+        self.settings_panel.background_changed.connect(self.apply_background_key)
+        self.settings_panel.show()
+        self.settings_panel.raise_()
+        self.settings_panel.activateWindow()
+        return self.settings_panel
+
+    def open_settings(self):
+        return self.show_settings_panel()
 
     def show_history_dialog(self):
         if self.history_dialog is not None and self.history_dialog.isVisible():
@@ -265,7 +287,7 @@ class AppController(QObject):
         if self.reminder_dialog is not None and self.reminder_dialog.isVisible():
             return
 
-        self.reminder_dialog = ReminderDialog()
+        self.reminder_dialog = ReminderDialog(background_key=self.config.background_key)
         self.reminder_dialog.action_selected.connect(self._handle_dialog_finished)
         self.reminder_dialog.show()
         self.reminder_dialog.raise_()
