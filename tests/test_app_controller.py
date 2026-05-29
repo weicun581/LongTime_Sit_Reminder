@@ -1,9 +1,12 @@
 import pathlib
 import sys
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtGui import QKeyEvent
+from PyQt5.QtTest import QTest
 from PyQt5.QtGui import QCloseEvent, QIcon
 from PyQt5.QtWidgets import QApplication, QMainWindow, QStyle, QSystemTrayIcon
 
@@ -57,9 +60,9 @@ class AppControllerTest(unittest.TestCase):
     def test_preview_window_exposes_timer_control_buttons(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
 
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
+        self.assertEqual(controller.preview_toggle_button.text(), "开始")
         self.assertEqual(controller.preview_reset_button.text(), "重置")
+        self.assertEqual(controller.preview_toggle_shortcut.key().toString(), "Space")
 
     def test_preview_window_uses_main_window_with_menu_bar(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -75,15 +78,14 @@ class AppControllerTest(unittest.TestCase):
         button_layout = controller.preview_button_layout
 
         self.assertEqual(button_layout.columnCount(), 2)
-        self.assertEqual(button_layout.itemAtPosition(0, 0).widget(), controller.preview_start_button)
-        self.assertEqual(button_layout.itemAtPosition(0, 1).widget(), controller.preview_pause_button)
-        self.assertEqual(button_layout.itemAtPosition(1, 0).widget(), controller.preview_reset_button)
-        self.assertEqual(button_layout.itemAtPosition(1, 1).widget(), controller.preview_reminder_button)
+        self.assertEqual(button_layout.itemAtPosition(0, 0).widget(), controller.preview_toggle_button)
+        self.assertEqual(button_layout.itemAtPosition(0, 1).widget(), controller.preview_reset_button)
+        self.assertEqual(button_layout.itemAtPosition(1, 0).widget(), controller.preview_reminder_button)
+        self.assertEqual(button_layout.itemAtPosition(1, 1), None)
         self.assertEqual(button_layout.itemAtPosition(2, 0), None)
         self.assertEqual(button_layout.itemAtPosition(2, 1), None)
         self.assertFalse(hasattr(controller, "preview_tabs"))
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
+        self.assertEqual(controller.preview_toggle_button.text(), "开始")
         self.assertEqual(controller.preview_reset_button.text(), "重置")
         self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
 
@@ -92,8 +94,7 @@ class AppControllerTest(unittest.TestCase):
 
         central_widget = controller.preview_window.centralWidget()
 
-        self.assertEqual(controller.preview_start_button.parent(), central_widget)
-        self.assertEqual(controller.preview_pause_button.parent(), central_widget)
+        self.assertEqual(controller.preview_toggle_button.parent(), central_widget)
         self.assertEqual(controller.preview_reset_button.parent(), central_widget)
         self.assertEqual(controller.preview_reminder_button.parent(), central_widget)
 
@@ -105,6 +106,7 @@ class AppControllerTest(unittest.TestCase):
 
         self.assertIn("设置", menu_texts)
         self.assertIn("历史版本", menu_texts)
+        self.assertIn("运行记录", menu_texts)
 
     def test_settings_action_is_attached_to_menu_bar(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -129,6 +131,12 @@ class AppControllerTest(unittest.TestCase):
 
         self.assertEqual(controller.preview_history_action.text(), "历史版本")
         self.assertIn(controller.preview_history_action, controller.preview_window.menuBar().actions())
+
+    def test_run_history_action_is_attached_to_menu_bar(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        self.assertEqual(controller.preview_run_history_action.text(), "运行记录")
+        self.assertIn(controller.preview_run_history_action, controller.preview_window.menuBar().actions())
 
     def test_menu_bar_is_part_of_preview_window(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -184,6 +192,136 @@ class AppControllerTest(unittest.TestCase):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
 
         self.assertEqual(controller.tray_icon.history_action.text(), "历史版本")
+
+    def test_run_history_action_opens_run_history_dialog(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+
+        controller.preview_run_history_action.trigger()
+
+        self.assertIsNotNone(controller.run_history_dialog)
+        self.assertTrue(controller.run_history_dialog.isVisible())
+        self.assertEqual(controller.run_history_dialog.windowTitle(), "运行记录")
+        controller.run_history_dialog.close()
+        self.app.processEvents()
+
+    def test_start_and_pause_record_run_segment(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(side_effect=[100, 160])
+
+        controller.start_countdown()
+        controller.pause_countdown()
+
+        self.assertEqual(len(controller.run_history_store.records), 1)
+        record = controller.run_history_store.records[0]
+        self.assertEqual(record["start_at"], 100)
+        self.assertEqual(record["end_at"], 160)
+        self.assertEqual(record["duration_seconds"], 60)
+        self.assertEqual(record["end_reason"], "pause")
+
+    def test_reset_records_run_segment(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(side_effect=[200, 245])
+
+        controller.start_countdown()
+        controller.reset_countdown()
+
+        self.assertEqual(len(controller.run_history_store.records), 1)
+        record = controller.run_history_store.records[0]
+        self.assertEqual(record["start_at"], 200)
+        self.assertEqual(record["end_at"], 245)
+        self.assertEqual(record["duration_seconds"], 45)
+        self.assertEqual(record["end_reason"], "reset")
+
+    def test_run_history_dialog_shows_today_total_and_records(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.run_history_store.records = [
+            {
+                "start_at": 1748448000,
+                "end_at": 1748448060,
+                "duration_seconds": 60,
+                "end_reason": "pause",
+            },
+            {
+                "start_at": 1748448120,
+                "end_at": 1748448240,
+                "duration_seconds": 120,
+                "end_reason": "reset",
+            },
+        ]
+
+        dialog = controller.show_run_history_dialog()
+
+        text = dialog.toPlainText()
+
+        self.assertIn("今日累计：00:03:00", text)
+        self.assertIn(datetime.fromtimestamp(1748448000).strftime("%Y-%m-%d"), text)
+        self.assertIn(datetime.fromtimestamp(1748448000).strftime("%H:%M:%S"), text)
+        self.assertIn(datetime.fromtimestamp(1748448240).strftime("%H:%M:%S"), text)
+        self.assertIn("暂停", text)
+        self.assertIn("重置", text)
+        dialog.close()
+        self.app.processEvents()
+
+    def test_run_history_dialog_groups_multiple_days(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.run_history_store.records = [
+            {
+                "start_at": 1748361600,
+                "end_at": 1748361660,
+                "duration_seconds": 60,
+                "end_reason": "pause",
+            },
+            {
+                "start_at": 1748448000,
+                "end_at": 1748448180,
+                "duration_seconds": 180,
+                "end_reason": "complete",
+            },
+        ]
+
+        dialog = controller.show_run_history_dialog()
+        text = dialog.toPlainText()
+
+        self.assertIn(datetime.fromtimestamp(1748361600).strftime("%Y-%m-%d"), text)
+        self.assertIn(datetime.fromtimestamp(1748448000).strftime("%Y-%m-%d"), text)
+        self.assertIn("完成", text)
+        dialog.close()
+        self.app.processEvents()
+
+    def test_complete_reminder_records_run_segment(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.start_countdown()
+        controller._active_run_started_at = 300
+        controller.reminder_dialog = MagicMock()
+        controller.reminder_dialog.get_action.return_value = "complete"
+        controller._now_ts = MagicMock(return_value=360)
+
+        controller._handle_dialog_finished("complete")
+
+        self.assertEqual(len(controller.run_history_store.records), 1)
+        record = controller.run_history_store.records[0]
+        self.assertEqual(record["start_at"], 300)
+        self.assertEqual(record["end_at"], 360)
+        self.assertEqual(record["duration_seconds"], 60)
+        self.assertEqual(record["end_reason"], "complete")
+
+    def test_run_history_dialog_translates_complete_reason(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.run_history_store.records = [
+            {
+                "start_at": 1748448000,
+                "end_at": 1748448060,
+                "duration_seconds": 60,
+                "end_reason": "complete",
+            }
+        ]
+
+        dialog = controller.show_run_history_dialog()
+
+        self.assertIn("完成", dialog.toPlainText())
+        self.assertNotIn("complete", dialog.toPlainText())
+        dialog.close()
+        self.app.processEvents()
 
     def test_history_action_opens_history_dialog(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
@@ -319,6 +457,22 @@ class AppControllerTest(unittest.TestCase):
         self.assertFalse(controller.scheduler.is_paused)
         self.assertTrue(controller.scheduler.is_running)
 
+    def test_reminder_overlay_escape_restarts_full_interval(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.start()
+        controller.scheduler.next_due_ts = 100
+        controller._now_ts = MagicMock(side_effect=[100, 150])
+
+        controller._check_due()
+        controller.reminder_dialog.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+
+        self.assertIsNone(controller.reminder_dialog)
+        self.assertEqual(controller.scheduler.next_due_ts, 150 + controller.scheduler.configured_duration_seconds)
+        self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
+        self.assertFalse(controller.scheduler.is_snoozed)
+        self.assertFalse(controller.scheduler.is_paused)
+        self.assertTrue(controller.scheduler.is_running)
+
     def test_reminder_dialog_shows_grass_image(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
 
@@ -397,6 +551,7 @@ class AppControllerTest(unittest.TestCase):
         self.assertTrue(callable(dialog.has_grass_image))
         self.assertTrue(callable(dialog.click_to_close_enabled))
         self.assertTrue(callable(dialog.mousePressEvent))
+        self.assertTrue(callable(dialog.keyPressEvent))
         self.assertTrue(callable(dialog.resizeEvent))
         self.assertTrue(callable(dialog.showEvent))
         self.assertTrue(callable(dialog._apply_primary_screen_geometry))
@@ -430,11 +585,9 @@ class AppControllerTest(unittest.TestCase):
         self.assertIsNotNone(controller.preview_history_action)
         self.assertIsNotNone(controller.preview_reminder_button)
         self.assertEqual(controller.preview_reminder_button.text(), "预览提醒弹窗")
-        self.assertEqual(controller.preview_start_button.text(), "开始")
-        self.assertEqual(controller.preview_pause_button.text(), "暂停")
+        self.assertEqual(controller.preview_toggle_button.text(), "暂停")
         self.assertEqual(controller.preview_reset_button.text(), "重置")
-        self.assertEqual(controller.preview_start_button.objectName(), "primaryActionButton")
-        self.assertEqual(controller.preview_pause_button.objectName(), "secondaryActionButton")
+        self.assertEqual(controller.preview_toggle_button.objectName(), "primaryActionButton")
         self.assertEqual(controller.preview_reset_button.objectName(), "secondaryActionButton")
         self.assertFalse(controller.preview_window.windowIcon().isNull())
         self.assertEqual(controller.preview_window.windowTitle(), f"久坐提醒 v{APP_VERSION}")
@@ -444,21 +597,16 @@ class AppControllerTest(unittest.TestCase):
         self.assertIsNotNone(controller.preview_button_layout)
         self.assertEqual(controller.preview_status_label.text(), "距离下次提醒")
         self.assertRegex(controller.preview_countdown_label.text(), r"\d{2}:\d{2}")
-        self.assertTrue(controller.preview_start_button.isEnabled())
-        self.assertTrue(controller.preview_pause_button.isEnabled())
+        self.assertTrue(controller.preview_toggle_button.isEnabled())
         self.assertTrue(controller.preview_reset_button.isEnabled())
-        self.assertEqual(controller.preview_start_button.parent(), controller.preview_window.centralWidget())
-        self.assertEqual(controller.preview_pause_button.parent(), controller.preview_window.centralWidget())
+        self.assertEqual(controller.preview_toggle_button.parent(), controller.preview_window.centralWidget())
         self.assertEqual(controller.preview_reset_button.parent(), controller.preview_window.centralWidget())
         self.assertEqual(controller.preview_reminder_button.parent(), controller.preview_window.centralWidget())
-        self.assertTrue(isinstance(controller.preview_start_button.text(), str))
-        self.assertTrue(isinstance(controller.preview_pause_button.text(), str))
+        self.assertTrue(isinstance(controller.preview_toggle_button.text(), str))
         self.assertTrue(isinstance(controller.preview_reset_button.text(), str))
-        self.assertEqual(controller.preview_start_button.text().strip(), "开始")
-        self.assertEqual(controller.preview_pause_button.text().strip(), "暂停")
+        self.assertEqual(controller.preview_toggle_button.text().strip(), "暂停")
         self.assertEqual(controller.preview_reset_button.text().strip(), "重置")
-        self.assertGreater(controller.preview_start_button.minimumHeight(), 0)
-        self.assertGreater(controller.preview_pause_button.minimumHeight(), 0)
+        self.assertGreater(controller.preview_toggle_button.minimumHeight(), 0)
         self.assertGreater(controller.preview_reset_button.minimumHeight(), 0)
         self.assertGreaterEqual(controller.preview_window.minimumWidth(), 420)
         self.assertEqual(controller.preview_status_label.objectName(), "previewStatusLabel")
@@ -467,13 +615,13 @@ class AppControllerTest(unittest.TestCase):
         self.assertIn("#primaryActionButton", controller.preview_window.centralWidget().styleSheet())
         self.assertIn("#secondaryActionButton", controller.preview_window.centralWidget().styleSheet())
 
-    def test_pause_button_freezes_remaining_time(self):
+    def test_toggle_button_freezes_remaining_time(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
         controller.scheduler.update_interval(interval_seconds=60, now_ts=0)
         controller._now_ts = MagicMock(side_effect=[100, 130, 130])
 
         controller.preview_reset_button.click()
-        controller.preview_pause_button.click()
+        controller.preview_toggle_button.click()
         frozen_value = controller.preview_countdown_label.text()
         controller._check_due()
 
@@ -483,8 +631,28 @@ class AppControllerTest(unittest.TestCase):
         self.assertEqual(controller.scheduler.remaining_seconds, 30)
         self.assertEqual(controller.preview_status_label.text(), "已暂停")
         self.assertEqual(controller.preview_countdown_label.text(), "00:30")
+        self.assertEqual(controller.preview_toggle_button.text(), "开始")
         self.assertIsNone(controller.scheduler.next_due_ts)
         self.assertIsNone(controller.reminder_dialog)
+
+    def test_space_shortcut_toggles_countdown_state(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller.start()
+        controller._now_ts = MagicMock(side_effect=[100, 120])
+        controller.preview_window.activateWindow()
+        controller.preview_window.setFocus()
+        self.app.processEvents()
+
+        QTest.keyClick(controller.preview_window, Qt.Key_Space)
+
+        self.assertTrue(controller.scheduler.is_paused)
+        self.assertEqual(controller.preview_toggle_button.text(), "开始")
+
+        QTest.keyClick(controller.preview_window, Qt.Key_Space)
+
+        self.assertTrue(controller.scheduler.is_running)
+        self.assertFalse(controller.scheduler.is_paused)
+        self.assertEqual(controller.preview_toggle_button.text(), "暂停")
 
     def test_apply_interval_seconds_applies_second_based_duration(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)

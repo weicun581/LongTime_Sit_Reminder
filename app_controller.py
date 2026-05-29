@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 
 from PyQt5.QtCore import QObject, QTimer, Qt
-from PyQt5.QtGui import QCloseEvent, QIcon
+from PyQt5.QtGui import QCloseEvent, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QShortcut,
     QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -21,9 +22,10 @@ from PyQt5.QtWidgets import (
 APP_VERSION = "0.3.0"
 
 from config import AppConfig
-from history_dialog import HistoryDialog
+from history_dialog import HistoryDialog, RunHistoryDialog
 from reminder_dialog import ReminderDialog
 from reminder_scheduler import ReminderScheduler
+from run_history import RunHistoryStore
 from settings_dialog import SettingsDialog
 from settings_panel import SettingsPanel
 from tray_icon import TrayIcon
@@ -42,8 +44,12 @@ class AppController(QObject):
         )
         self.reminder_dialog = None
         self.history_dialog = None
+        self.run_history_dialog = None
         self.settings_panel = None
         self.history_markdown_path = self.base_dir / "res" / "version_history.md"
+        self.run_history_path = self.base_dir / "run_history.json"
+        self.run_history_store = RunHistoryStore(None if Path(base_dir) == Path(__file__).resolve().parent else self.run_history_path)
+        self._active_run_started_at = None
 
         self.check_timer = QTimer(self)
         self.check_timer.setInterval(1000)
@@ -126,8 +132,11 @@ class AppController(QObject):
         self.preview_settings_action.triggered.connect(self.show_settings_panel)
         self.preview_history_action = QAction("历史版本", window)
         self.preview_history_action.triggered.connect(self.show_history_dialog)
+        self.preview_run_history_action = QAction("运行记录", window)
+        self.preview_run_history_action.triggered.connect(self.show_run_history_dialog)
         window.menuBar().addAction(self.preview_settings_action)
         window.menuBar().addAction(self.preview_history_action)
+        window.menuBar().addAction(self.preview_run_history_action)
 
         layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -144,15 +153,15 @@ class AppController(QObject):
         layout.addWidget(self.preview_countdown_label)
         layout.addSpacing(8)
 
-        self.preview_start_button = QPushButton("开始", central_widget)
-        self.preview_start_button.setObjectName("primaryActionButton")
-        self.preview_pause_button = QPushButton("暂停", central_widget)
-        self.preview_pause_button.setObjectName("secondaryActionButton")
+        self.preview_toggle_button = QPushButton("开始", central_widget)
+        self.preview_toggle_button.setObjectName("primaryActionButton")
         self.preview_reset_button = QPushButton("重置", central_widget)
         self.preview_reset_button.setObjectName("secondaryActionButton")
-        self.preview_start_button.clicked.connect(self.start_countdown)
-        self.preview_pause_button.clicked.connect(self.pause_countdown)
+        self.preview_toggle_button.clicked.connect(self.toggle_countdown)
         self.preview_reset_button.clicked.connect(self.reset_countdown)
+
+        self.preview_toggle_shortcut = QShortcut(QKeySequence(Qt.Key_Space), window)
+        self.preview_toggle_shortcut.activated.connect(self.toggle_countdown)
 
         self.preview_reminder_button = QPushButton("预览提醒弹窗", central_widget)
         self.preview_reminder_button.setObjectName("secondaryActionButton")
@@ -161,10 +170,9 @@ class AppController(QObject):
         self.preview_button_layout = QGridLayout()
         self.preview_button_layout.setHorizontalSpacing(12)
         self.preview_button_layout.setVerticalSpacing(12)
-        self.preview_button_layout.addWidget(self.preview_start_button, 0, 0)
-        self.preview_button_layout.addWidget(self.preview_pause_button, 0, 1)
-        self.preview_button_layout.addWidget(self.preview_reset_button, 1, 0)
-        self.preview_button_layout.addWidget(self.preview_reminder_button, 1, 1)
+        self.preview_button_layout.addWidget(self.preview_toggle_button, 0, 0)
+        self.preview_button_layout.addWidget(self.preview_reset_button, 0, 1)
+        self.preview_button_layout.addWidget(self.preview_reminder_button, 1, 0)
         layout.addLayout(self.preview_button_layout)
 
         return window
@@ -187,16 +195,41 @@ class AppController(QObject):
     def start_countdown(self):
         now_ts = self._now_ts()
         self.scheduler.start(now_ts=now_ts)
+        if self.scheduler.is_running and self._active_run_started_at is None:
+            self._active_run_started_at = now_ts
         self._update_countdown_display(now_ts=now_ts)
 
     def pause_countdown(self):
         now_ts = self._now_ts()
+        self._finish_active_run(now_ts=now_ts, end_reason="pause")
         self.scheduler.pause(now_ts=now_ts)
         self._update_countdown_display(now_ts=now_ts)
 
+    def _finish_active_run(self, now_ts, end_reason):
+        if self._active_run_started_at is None:
+            return
+        self.run_history_store.add_record(
+            start_at=self._active_run_started_at,
+            end_at=now_ts,
+            end_reason=end_reason,
+        )
+        self._active_run_started_at = None
+        if self.run_history_dialog is not None:
+            self.run_history_dialog.refresh()
+        return
+
+    def toggle_countdown(self):
+        if self.scheduler.is_running:
+            self.pause_countdown()
+        else:
+            self.start_countdown()
+
     def reset_countdown(self):
         now_ts = self._now_ts()
+        self._finish_active_run(now_ts=now_ts, end_reason="reset")
         self.scheduler.reset(now_ts=now_ts)
+        if self.scheduler.is_running:
+            self._active_run_started_at = now_ts
         self._update_countdown_display(now_ts=now_ts)
 
     def _update_countdown_display(self, now_ts):
@@ -215,6 +248,7 @@ class AppController(QObject):
 
         minutes, seconds = divmod(remaining_seconds, 60)
         self.preview_countdown_label.setText(f"{minutes:02d}:{seconds:02d}")
+        self.preview_toggle_button.setText("暂停" if self.scheduler.is_running else "开始")
 
     def _handle_preview_close(self, event: QCloseEvent):
         self.preview_window.hide()
@@ -266,6 +300,19 @@ class AppController(QObject):
         self.history_dialog.activateWindow()
         return self.history_dialog
 
+    def show_run_history_dialog(self):
+        if self.run_history_dialog is not None and self.run_history_dialog.isVisible():
+            self.run_history_dialog.refresh()
+            self.run_history_dialog.raise_()
+            self.run_history_dialog.activateWindow()
+            return self.run_history_dialog
+
+        self.run_history_dialog = RunHistoryDialog(self.run_history_store)
+        self.run_history_dialog.show()
+        self.run_history_dialog.raise_()
+        self.run_history_dialog.activateWindow()
+        return self.run_history_dialog
+
     def quit_app(self):
         self.check_timer.stop()
         self.tray_icon.hide()
@@ -297,10 +344,13 @@ class AppController(QObject):
     def _handle_dialog_finished(self, _result):
         action = self.reminder_dialog.get_action() if self.reminder_dialog else None
         now_ts = self._now_ts()
+        self._finish_active_run(now_ts=now_ts, end_reason=action or "complete")
         if action == "snooze":
             self.scheduler.snooze(now_ts=now_ts)
+            self._active_run_started_at = now_ts
         else:
             self.scheduler.complete_reminder(now_ts=now_ts)
+            self._active_run_started_at = now_ts
         self._update_countdown_display(now_ts=now_ts)
         self.reminder_dialog = None
 
