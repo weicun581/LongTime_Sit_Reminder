@@ -3,7 +3,7 @@ import sys
 import unittest
 
 from PyQt5.QtCore import QEvent, QPoint, Qt
-from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtGui import QKeyEvent, QMouseEvent
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config import AppConfig
 from reminder_dialog import ReminderDialog
+from run_history import RunHistoryStore
 from settings_dialog import SettingsDialog
 
 
@@ -120,6 +121,12 @@ class SettingsDialogTest(unittest.TestCase):
 
         self.assertEqual(dialog.image_label.objectName(), "grassImageLabel")
 
+    def test_reminder_dialog_has_packaged_background_image(self):
+        dialog = ReminderDialog()
+
+        self.assertTrue(dialog.has_grass_image())
+        self.assertIsNotNone(dialog.image_label.pixmap())
+
     def test_reminder_dialog_uses_full_screen_grass_image_presentation(self):
         dialog = ReminderDialog()
 
@@ -158,6 +165,16 @@ class SettingsDialogTest(unittest.TestCase):
             Qt.NoModifier,
         )
         dialog.mousePressEvent(event)
+
+        self.assertEqual(dialog.get_action(), "complete")
+        self.assertEqual(dialog.result(), dialog.Accepted)
+
+    def test_reminder_dialog_escape_marks_complete_action(self):
+        dialog = ReminderDialog()
+        dialog.show()
+        self.app.processEvents()
+
+        dialog.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
 
         self.assertEqual(dialog.get_action(), "complete")
         self.assertEqual(dialog.result(), dialog.Accepted)
@@ -217,6 +234,9 @@ class SettingsDialogTest(unittest.TestCase):
         self.assertEqual(dialog.cancel_button.text(), "取消")
         self.assertEqual(dialog.ok_button.objectName(), "primaryActionButton")
         self.assertEqual(dialog.cancel_button.objectName(), "secondaryActionButton")
+
+    def test_run_history_store_translates_auto_pause_reason(self):
+        self.assertEqual(RunHistoryStore.translate_end_reason("auto_pause"), "自动暂停")
 
 
 if __name__ == "__main__":

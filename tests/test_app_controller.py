@@ -232,6 +232,115 @@ class AppControllerTest(unittest.TestCase):
         self.assertEqual(record["duration_seconds"], 45)
         self.assertEqual(record["end_reason"], "reset")
 
+    def test_idle_timeout_auto_pauses_running_countdown(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(side_effect=[100, 160])
+        controller._system_idle_seconds = MagicMock(return_value=300)
+
+        controller.start_countdown()
+        controller._check_due()
+
+        self.assertTrue(controller.scheduler.is_paused)
+        self.assertFalse(controller.scheduler.is_running)
+        self.assertEqual(controller.scheduler.remaining_seconds, controller.scheduler.configured_duration_seconds - 60)
+        self.assertEqual(controller.preview_status_label.text(), "已暂停")
+        self.assertEqual(len(controller.run_history_store.records), 1)
+        self.assertEqual(controller.run_history_store.records[0]["end_reason"], "auto_pause")
+
+    def test_idle_timeout_does_not_auto_pause_when_reminder_dialog_is_visible(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(return_value=100)
+        controller._system_idle_seconds = MagicMock(return_value=300)
+        controller.start_countdown()
+        controller.reminder_dialog = MagicMock()
+        controller.reminder_dialog.isVisible.return_value = True
+
+        controller._check_due()
+
+        self.assertTrue(controller.scheduler.is_running)
+        self.assertFalse(controller.scheduler.is_paused)
+        self.assertEqual(len(controller.run_history_store.records), 0)
+
+    def test_idle_timeout_does_not_pause_when_countdown_is_not_running(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(return_value=160)
+        controller._system_idle_seconds = MagicMock(return_value=300)
+
+        controller._check_due()
+
+        self.assertFalse(controller.scheduler.is_paused)
+        self.assertFalse(controller.scheduler.is_running)
+        self.assertEqual(len(controller.run_history_store.records), 0)
+
+    def test_idle_timeout_does_not_duplicate_records_when_already_paused(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(side_effect=[100, 160, 220])
+        controller._system_idle_seconds = MagicMock(return_value=300)
+
+        controller.start_countdown()
+        controller._check_due()
+        controller._check_due()
+
+        self.assertEqual(len(controller.run_history_store.records), 1)
+        self.assertEqual(controller.run_history_store.records[0]["end_reason"], "auto_pause")
+
+    def test_system_idle_seconds_returns_zero_when_api_call_fails(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        original_platform = sys.platform
+        original_windll = getattr(__import__("ctypes"), "windll", None)
+
+        class _FakeUser32:
+            @staticmethod
+            def GetLastInputInfo(_info):
+                return 0
+
+        class _FakeKernel32:
+            @staticmethod
+            def GetTickCount64():
+                return 1000
+
+        class _FakeWindll:
+            user32 = _FakeUser32()
+            kernel32 = _FakeKernel32()
+
+        try:
+            sys.platform = "win32"
+            __import__("ctypes").windll = _FakeWindll()
+            self.assertEqual(controller._system_idle_seconds(), 0)
+        finally:
+            sys.platform = original_platform
+            if original_windll is None:
+                delattr(__import__("ctypes"), "windll")
+            else:
+                __import__("ctypes").windll = original_windll
+
+
+    def test_idle_timeout_without_active_run_start_does_not_crash_or_write_record(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(side_effect=[100, 160])
+        controller._system_idle_seconds = MagicMock(return_value=300)
+
+        controller.start_countdown()
+        controller._active_run_started_at = None
+        controller._check_due()
+
+        self.assertTrue(controller.scheduler.is_paused)
+        self.assertEqual(len(controller.run_history_store.records), 0)
+
+    def test_manual_resume_while_still_idle_allows_auto_pause_again_next_tick(self):
+        controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
+        controller._now_ts = MagicMock(side_effect=[100, 160, 161, 220])
+        controller._system_idle_seconds = MagicMock(return_value=300)
+
+        controller.start_countdown()
+        controller._check_due()
+        controller.start_countdown()
+        controller._check_due()
+
+        self.assertEqual(len(controller.run_history_store.records), 2)
+        self.assertEqual(controller.run_history_store.records[0]["end_reason"], "auto_pause")
+        self.assertEqual(controller.run_history_store.records[1]["end_reason"], "auto_pause")
+
     def test_run_history_dialog_shows_today_total_and_records(self):
         controller = AppController(app=self.app, base_dir=PROJECT_ROOT)
         controller.run_history_store.records = [

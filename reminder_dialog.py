@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QGuiApplication, QMouseEvent, QPixmap
+from PyQt5.QtGui import QGuiApplication, QKeyEvent, QMouseEvent, QPixmap
 from PyQt5.QtWidgets import QLabel, QWidget
 
 from settings_panel import BACKGROUND_OPTIONS
@@ -100,11 +100,21 @@ class ReminderDialog(QWidget):
         self._refresh_scaled_pixmap()
 
     def mousePressEvent(self, event: QMouseEvent):
+        self._complete_and_close()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key_Escape:
+            self._complete_and_close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _complete_and_close(self):
         self._action = "complete"
         self._result = self.Accepted
         self.action_selected.emit(self._action)
         self.close()
-        super().mousePressEvent(event)
 
     def get_action(self):
         return self._action

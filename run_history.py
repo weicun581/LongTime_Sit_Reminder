@@ -78,6 +78,7 @@ class RunHistoryStore:
             "reset": "重置",
             "complete": "完成",
             "snooze": "稍后提醒",
+            "auto_pause": "自动暂停",
         }
         return labels.get(end_reason, end_reason)
 

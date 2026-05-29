@@ -1,6 +1,11 @@
+import ctypes
 import sys
 import time
 from pathlib import Path
+
+
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
 
 from PyQt5.QtCore import QObject, QTimer, Qt
 from PyQt5.QtGui import QCloseEvent, QIcon, QKeySequence
@@ -325,10 +330,36 @@ class AppController(QObject):
             return
         if self.reminder_dialog is not None and self.reminder_dialog.isVisible():
             return
+        if self._should_auto_pause(self._system_idle_seconds()):
+            self._auto_pause_countdown(now_ts)
+            return
         if now_ts < self.scheduler.next_due_ts:
             return
 
         self.show_reminder_preview()
+
+    def _should_auto_pause(self, idle_seconds, threshold_seconds=5 * 60):
+        return self.scheduler.is_running and not self.scheduler.is_paused and idle_seconds >= threshold_seconds
+
+    def _auto_pause_countdown(self, now_ts):
+        self._finish_active_run(now_ts=now_ts, end_reason="auto_pause")
+        self.scheduler.pause(now_ts=now_ts)
+        self._update_countdown_display(now_ts=now_ts)
+
+    def _system_idle_seconds(self):
+        if sys.platform != "win32":
+            return 0
+        user32 = getattr(ctypes, "windll", None)
+        kernel32 = getattr(ctypes, "windll", None)
+        if user32 is None or kernel32 is None:
+            return 0
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0
+        now_ms = ctypes.windll.kernel32.GetTickCount64()
+        idle_ms = max(0, int(now_ms) - int(info.dwTime))
+        return idle_ms // 1000
 
     def show_reminder_preview(self):
         if self.reminder_dialog is not None and self.reminder_dialog.isVisible():
